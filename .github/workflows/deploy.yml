@@ -1,0 +1,94 @@
+name: Deploy Next.js to EC2
+run-name: ${{ github.actor }} is deploying Next.js app 🚀
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run linter
+        run: npm run lint
+
+      - name: Build application
+        run: npm run build
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build application
+        run: npm run build
+
+      - name: Deploy to EC2
+        env:
+          PRIVATE_KEY: ${{ secrets.EC2_SSH_KEY }}
+          HOST: ${{ secrets.HOST_IP }}
+          USER: ${{ secrets.USERNAME }}
+        run: |
+          echo "$PRIVATE_KEY" > private_key.pem
+          chmod 600 private_key.pem
+
+          # Create deployment package
+          tar -czf deployment.tar.gz --exclude=node_modules --exclude=.git --exclude=private_key.pem .
+
+          # Copy files to EC2
+          scp -o StrictHostKeyChecking=no -i private_key.pem deployment.tar.gz $USER@$HOST:/home/$USER/
+
+          # Deploy on EC2
+          ssh -o StrictHostKeyChecking=no -i private_key.pem $USER@$HOST << 'EOF'
+            # Stop existing application
+            pm2 stop nextjs-app || true
+            
+            # Backup current deployment
+            rm -rf ~/app-backup
+            mv ~/my-app ~/app-backup || true
+            
+            # Extract new deployment
+            mkdir -p ~/my-app
+            tar -xzf ~/deployment.tar.gz -C ~/my-app
+            cd ~/my-app
+            
+            # Install dependencies and build
+            npm ci
+            npm run build
+            
+            # Start application with PM2
+            pm2 start npm --name "nextjs-app" -- start
+            pm2 save
+            
+            # Clean up
+            rm ~/deployment.tar.gz
+          EOF
+
+          # Clean up
+          rm private_key.pem
