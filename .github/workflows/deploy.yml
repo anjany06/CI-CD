@@ -1,42 +1,108 @@
-name: Deploy Next.js Application
+name: Deploy Next.js to EC2
+run-name: ${{ github.actor }} is deploying Next.js app 🚀
+
 on:
   push:
-    branches:
-      - main
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
 jobs:
-  deploy:
+  test:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v2
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v2
+        uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
         with:
-          node-version: '14'
-
+          node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: 'next-aws-deploy/package-lock.json'
+      
+      - name: Change to app directory
+        run: cd next-aws-deploy
+      
       - name: Install dependencies
-        run: npm install
+        run: |
+          cd next-aws-deploy
+          npm ci
+      
+      - name: Run linter
+        run: |
+          cd next-aws-deploy
+          npm run lint
+      
+      - name: Build application
+        run: |
+          cd next-aws-deploy
+          npm run build
 
-      - name: Build the application
-        run: npm run build
-
-      - name: Copy files to EC2
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: 'next-aws-deploy/package-lock.json'
+      
+      - name: Install dependencies and build
+        run: |
+          cd next-aws-deploy
+          npm ci
+          npm run build
+      
+      - name: Create deployment package
+        run: |
+          cd next-aws-deploy
+          tar -czf ../deployment.tar.gz --exclude=node_modules --exclude=.git .
+      
+      - name: Deploy to EC2
         env:
           PRIVATE_KEY: ${{ secrets.EC2_SSH_KEY }}
-          HOST: ${{ secrets.EC2_HOST }}
-          USER: ${{ secrets.EC2_USER }}
+          HOST: ${{ secrets.HOST_IP }}
+          USER: ${{ secrets.USERNAME }}
         run: |
           echo "$PRIVATE_KEY" > private_key.pem
           chmod 600 private_key.pem
-          scp -o StrictHostKeyChecking=no -i private_key.pem -r ./* $USER@$HOST:/path/to/your/app
-
-      - name: Start application on EC2
-        env:
-          PRIVATE_KEY: ${{ secrets.EC2_SSH_KEY }}
-          HOST: ${{ secrets.EC2_HOST }}
-          USER: ${{ secrets.EC2_USER }}
-        run: |
-          echo "$PRIVATE_KEY" > private_key.pem
-          chmod 600 private_key.pem
-          ssh -o StrictHostKeyChecking=no -i private_key.pem $USER@$HOST "cd /path/to/your/app && npm install && npm start"
+          
+          # Copy deployment package to EC2
+          scp -o StrictHostKeyChecking=no -i private_key.pem deployment.tar.gz $USER@$HOST:/home/$USER/
+          
+          # Deploy on EC2
+          ssh -o StrictHostKeyChecking=no -i private_key.pem $USER@$HOST << 'EOF'
+            # Stop existing application
+            pm2 stop nextjs-app || true
+            
+            # Backup current deployment
+            rm -rf ~/app-backup
+            mv ~/my-app ~/app-backup || true
+            
+            # Extract new deployment
+            mkdir -p ~/my-app
+            tar -xzf ~/deployment.tar.gz -C ~/my-app
+            cd ~/my-app
+            
+            # Install dependencies and build
+            npm ci
+            npm run build
+            
+            # Start application with PM2
+            pm2 start npm --name "nextjs-app" -- start
+            pm2 save
+            
+            # Clean up
+            rm ~/deployment.tar.gz
+          EOF
+          
+          # Clean up local files
+          rm private_key.pem deployment.tar.gz
