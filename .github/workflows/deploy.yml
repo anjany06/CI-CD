@@ -69,28 +69,52 @@ jobs:
           HOST: ${{ secrets.HOST_IP }}
           USER: ${{ secrets.USERNAME }}
         run: |
-          # Create SSH key file with proper format and permissions
-          echo "$PRIVATE_KEY" | tr -d '\r' > private_key.pem
+          # Create SSH key file with proper format
+          echo "$PRIVATE_KEY" > private_key.pem
+          
+          # Remove any Windows carriage returns and ensure proper line endings
+          sed -i 's/\r$//' private_key.pem
+          
+          # Ensure the key ends with a newline
+          echo >> private_key.pem
+          
+          # Set proper permissions
           chmod 600 private_key.pem
           
-          # Add newline at end if missing
-          echo "" >> private_key.pem
-          
-          # Debug: Check key file structure
-          echo "Key file structure:"
-          head -n 1 private_key.pem
-          tail -n 1 private_key.pem
-          wc -l private_key.pem
-          
-          # Test SSH connection with verbose output
-          echo "Testing SSH connection..."
-          ssh -v -o StrictHostKeyChecking=no -o ConnectTimeout=30 -i private_key.pem $USER@$HOST "echo 'SSH connection successful'" 2>&1 || {
-            echo "SSH connection failed. Checking key permissions..."
-            ls -la private_key.pem
-            echo "Key content preview:"
-            head -n 2 private_key.pem
+          # Validate SSH key format
+          if ! grep -q "BEGIN.*PRIVATE KEY" private_key.pem; then
+            echo "❌ SSH key does not contain proper BEGIN header"
             exit 1
-          }
+          fi
+          
+          if ! grep -q "END.*PRIVATE KEY" private_key.pem; then
+            echo "❌ SSH key does not contain proper END footer"
+            exit 1
+          fi
+          
+          # Test SSH key validation
+          ssh-keygen -y -f private_key.pem > /dev/null 2>&1
+          if [ $? -ne 0 ]; then
+            echo "❌ SSH key validation failed"
+            echo "Key file size: $(wc -c < private_key.pem) bytes"
+            echo "Key file lines: $(wc -l < private_key.pem) lines"
+            echo "First line: $(head -n1 private_key.pem)"
+            echo "Last line: $(tail -n1 private_key.pem)"
+            exit 1
+          fi
+          
+          echo "✅ SSH key validation passed"
+          
+          # Test SSH connection
+          echo "Testing SSH connection..."
+          ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -i private_key.pem $USER@$HOST "echo 'SSH connection successful'"
+          
+          if [ $? -ne 0 ]; then
+            echo "❌ SSH connection failed"
+            exit 1
+          fi
+          
+          echo "✅ SSH connection successful"
           
           # Copy deployment package to EC2
           echo "Copying deployment package..."
@@ -99,10 +123,20 @@ jobs:
           # Deploy on EC2
           echo "Deploying application..."
           ssh -o StrictHostKeyChecking=no -i private_key.pem $USER@$HOST << 'EOF'
-            # Check if PM2 is installed
+            # Update system packages
+            sudo apt update -y
+            
+            # Install Node.js if not present
+            if ! command -v node &> /dev/null; then
+              echo "Installing Node.js..."
+              curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
+              sudo apt-get install -y nodejs
+            fi
+            
+            # Install PM2 if not present
             if ! command -v pm2 &> /dev/null; then
               echo "Installing PM2..."
-              npm install -g pm2
+              sudo npm install -g pm2
             fi
             
             # Stop existing application
@@ -119,7 +153,7 @@ jobs:
             
             # Install dependencies and build
             echo "Installing dependencies..."
-            npm ci
+            npm ci --only=production
             echo "Building application..."
             npm run build
             
@@ -127,13 +161,18 @@ jobs:
             echo "Starting application..."
             pm2 start npm --name "nextjs-app" -- start
             pm2 save
+            
+            # Setup PM2 to start on boot
+            pm2 startup
+            pm2 save
+            
+            echo "✅ Application deployed and running!"
             pm2 status
             
             # Clean up
             rm ~/deployment.tar.gz
-            echo "Deployment completed successfully!"
           EOF
           
           # Clean up local files
           rm private_key.pem deployment.tar.gz
-          echo "✅ Deployment finished!"
+          echo "✅ Deployment completed successfully!"
