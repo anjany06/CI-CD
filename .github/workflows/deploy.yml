@@ -21,9 +21,6 @@ jobs:
           cache: 'npm'
           cache-dependency-path: 'next-aws-deploy/package-lock.json'
       
-      - name: Change to app directory
-        run: cd next-aws-deploy
-      
       - name: Install dependencies
         run: |
           cd next-aws-deploy
@@ -68,17 +65,28 @@ jobs:
       
       - name: Deploy to EC2
         env:
-          PRIVATE_KEY: ${{ secrets.EC2_SSH_KEY }}
+          PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
           HOST: ${{ secrets.HOST_IP }}
           USER: ${{ secrets.USERNAME }}
         run: |
+          # Create SSH key file with proper permissions
           echo "$PRIVATE_KEY" > private_key.pem
           chmod 600 private_key.pem
           
+          # Verify key format
+          echo "Checking SSH key format..."
+          ssh-keygen -l -f private_key.pem || echo "Key format verification failed"
+          
+          # Test SSH connection first
+          echo "Testing SSH connection..."
+          ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -i private_key.pem $USER@$HOST "echo 'SSH connection successful'" || exit 1
+          
           # Copy deployment package to EC2
+          echo "Copying deployment package..."
           scp -o StrictHostKeyChecking=no -i private_key.pem deployment.tar.gz $USER@$HOST:/home/$USER/
           
           # Deploy on EC2
+          echo "Deploying application..."
           ssh -o StrictHostKeyChecking=no -i private_key.pem $USER@$HOST << 'EOF'
             # Stop existing application
             pm2 stop nextjs-app || true
