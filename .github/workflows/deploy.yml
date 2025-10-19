@@ -69,17 +69,28 @@ jobs:
           HOST: ${{ secrets.HOST_IP }}
           USER: ${{ secrets.USERNAME }}
         run: |
-          # Create SSH key file with proper permissions
-          echo "$PRIVATE_KEY" > private_key.pem
+          # Create SSH key file with proper format and permissions
+          echo "$PRIVATE_KEY" | tr -d '\r' > private_key.pem
           chmod 600 private_key.pem
           
-          # Verify key format
-          echo "Checking SSH key format..."
-          ssh-keygen -l -f private_key.pem || echo "Key format verification failed"
+          # Add newline at end if missing
+          echo "" >> private_key.pem
           
-          # Test SSH connection first
+          # Debug: Check key file structure
+          echo "Key file structure:"
+          head -n 1 private_key.pem
+          tail -n 1 private_key.pem
+          wc -l private_key.pem
+          
+          # Test SSH connection with verbose output
           echo "Testing SSH connection..."
-          ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -i private_key.pem $USER@$HOST "echo 'SSH connection successful'" || exit 1
+          ssh -v -o StrictHostKeyChecking=no -o ConnectTimeout=30 -i private_key.pem $USER@$HOST "echo 'SSH connection successful'" 2>&1 || {
+            echo "SSH connection failed. Checking key permissions..."
+            ls -la private_key.pem
+            echo "Key content preview:"
+            head -n 2 private_key.pem
+            exit 1
+          }
           
           # Copy deployment package to EC2
           echo "Copying deployment package..."
@@ -88,12 +99,18 @@ jobs:
           # Deploy on EC2
           echo "Deploying application..."
           ssh -o StrictHostKeyChecking=no -i private_key.pem $USER@$HOST << 'EOF'
+            # Check if PM2 is installed
+            if ! command -v pm2 &> /dev/null; then
+              echo "Installing PM2..."
+              npm install -g pm2
+            fi
+            
             # Stop existing application
-            pm2 stop nextjs-app || true
+            pm2 stop nextjs-app 2>/dev/null || echo "No existing app to stop"
             
             # Backup current deployment
             rm -rf ~/app-backup
-            mv ~/my-app ~/app-backup || true
+            mv ~/my-app ~/app-backup 2>/dev/null || echo "No existing app to backup"
             
             # Extract new deployment
             mkdir -p ~/my-app
@@ -101,16 +118,22 @@ jobs:
             cd ~/my-app
             
             # Install dependencies and build
+            echo "Installing dependencies..."
             npm ci
+            echo "Building application..."
             npm run build
             
             # Start application with PM2
+            echo "Starting application..."
             pm2 start npm --name "nextjs-app" -- start
             pm2 save
+            pm2 status
             
             # Clean up
             rm ~/deployment.tar.gz
+            echo "Deployment completed successfully!"
           EOF
           
           # Clean up local files
           rm private_key.pem deployment.tar.gz
+          echo "✅ Deployment finished!"
