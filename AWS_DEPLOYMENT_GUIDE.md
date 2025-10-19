@@ -98,13 +98,13 @@ npm run build
 ### 4.3 Start application
 ```bash
 # Start with PM2
-pm2 start npm --name "nextjs-app" -- start
+pm2 start npm --name "next-aws-deploy" -- start
 
 # Check status
 pm2 status
 
 # View logs
-pm2 logs nextjs-app
+pm2 logs next-aws-deploy
 ```
 
 ### 4.4 Test your application
