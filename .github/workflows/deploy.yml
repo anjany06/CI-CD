@@ -4,8 +4,6 @@ run-name: ${{ github.actor }} is deploying Next.js app 🚀
 on:
   push:
     branches: [main, master]
-  pull_request:
-    branches: [main, master]
 
 jobs:
   test:
@@ -63,68 +61,102 @@ jobs:
           cd next-aws-deploy
           tar -czf ../deployment.tar.gz --exclude=node_modules --exclude=.git .
       
+      - name: Debug secrets and setup SSH key
+        env:
+          PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          HOST: ${{ secrets.HOST_IP }}
+          USER: ${{ secrets.USERNAME }}
+        run: |
+          echo "Debug information:"
+          echo "HOST: ${HOST}"
+          echo "USER: ${USER}"
+          echo "Key length: ${#PRIVATE_KEY}"
+          
+          # Create SSH key file with proper format
+          printf '%s\n' "$PRIVATE_KEY" > private_key.pem
+          
+          # Set proper permissions
+          chmod 600 private_key.pem
+          
+          # Debug key structure
+          echo "Key file created with $(wc -l < private_key.pem) lines"
+          echo "First line: $(head -n1 private_key.pem)"
+          echo "Last line: $(tail -n1 private_key.pem)"
+          
+          # Validate SSH key format
+          if ! grep -q "BEGIN.*PRIVATE KEY" private_key.pem; then
+            echo "❌ SSH key does not contain proper BEGIN header"
+            head -n5 private_key.pem
+            exit 1
+          fi
+          
+          if ! grep -q "END.*PRIVATE KEY" private_key.pem; then
+            echo "❌ SSH key does not contain proper END footer" 
+            tail -n5 private_key.pem
+            exit 1
+          fi
+          
+          echo "✅ SSH key format looks correct"
+          
+          # Test SSH key validation with detailed output
+          echo "Testing SSH key validation..."
+          ssh-keygen -y -f private_key.pem > public_key.pub 2>ssh_keygen_error.log
+          if [ $? -ne 0 ]; then
+            echo "❌ SSH key validation failed"
+            echo "ssh-keygen error output:"
+            cat ssh_keygen_error.log
+            exit 1
+          fi
+          
+          echo "✅ SSH key validation passed"
+          echo "Generated public key fingerprint:"
+          ssh-keygen -lf private_key.pem
+          
+          # Test basic connectivity first
+          echo "Testing basic connectivity to ${HOST}..."
+          nc -zv ${HOST} 22 || {
+            echo "❌ Cannot reach ${HOST}:22"
+            exit 1
+          }
+          
+          echo "✅ Port 22 is reachable"
+          
+          # Test SSH connection with detailed debugging
+          echo "Testing SSH connection..."
+          ssh -v -o StrictHostKeyChecking=no -o ConnectTimeout=30 -i private_key.pem ${USER}@${HOST} "echo 'SSH connection successful'" 2>ssh_debug.log
+          
+          if [ $? -ne 0 ]; then
+            echo "❌ SSH connection failed"
+            echo "SSH debug output:"
+            cat ssh_debug.log
+            exit 1
+          fi
+          
+          echo "✅ SSH connection successful"
+          
       - name: Deploy to EC2
         env:
           PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
           HOST: ${{ secrets.HOST_IP }}
           USER: ${{ secrets.USERNAME }}
         run: |
-          # Create SSH key file with proper format
-          echo "$PRIVATE_KEY" > private_key.pem
-          
-          # Remove any Windows carriage returns and ensure proper line endings
-          sed -i 's/\r$//' private_key.pem
-          
-          # Ensure the key ends with a newline
-          echo >> private_key.pem
-          
-          # Set proper permissions
+          # Recreate SSH key (we know it works from previous step)
+          printf '%s\n' "$PRIVATE_KEY" > private_key.pem
           chmod 600 private_key.pem
-          
-          # Validate SSH key format
-          if ! grep -q "BEGIN.*PRIVATE KEY" private_key.pem; then
-            echo "❌ SSH key does not contain proper BEGIN header"
-            exit 1
-          fi
-          
-          if ! grep -q "END.*PRIVATE KEY" private_key.pem; then
-            echo "❌ SSH key does not contain proper END footer"
-            exit 1
-          fi
-          
-          # Test SSH key validation
-          ssh-keygen -y -f private_key.pem > /dev/null 2>&1
-          if [ $? -ne 0 ]; then
-            echo "❌ SSH key validation failed"
-            echo "Key file size: $(wc -c < private_key.pem) bytes"
-            echo "Key file lines: $(wc -l < private_key.pem) lines"
-            echo "First line: $(head -n1 private_key.pem)"
-            echo "Last line: $(tail -n1 private_key.pem)"
-            exit 1
-          fi
-          
-          echo "✅ SSH key validation passed"
-          
-          # Test SSH connection
-          echo "Testing SSH connection..."
-          ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -i private_key.pem $USER@$HOST "echo 'SSH connection successful'"
-          
-          if [ $? -ne 0 ]; then
-            echo "❌ SSH connection failed"
-            exit 1
-          fi
-          
-          echo "✅ SSH connection successful"
           
           # Copy deployment package to EC2
           echo "Copying deployment package..."
-          scp -o StrictHostKeyChecking=no -i private_key.pem deployment.tar.gz $USER@$HOST:/home/$USER/
+          scp -o StrictHostKeyChecking=no -i private_key.pem deployment.tar.gz ${USER}@${HOST}:/home/${USER}/
           
           # Deploy on EC2
           echo "Deploying application..."
-          ssh -o StrictHostKeyChecking=no -i private_key.pem $USER@$HOST << 'EOF'
-            # Update system packages
-            sudo apt update -y
+          ssh -o StrictHostKeyChecking=no -i private_key.pem ${USER}@${HOST} << 'EOF'
+            # Check current environment
+            echo "Current user: $(whoami)"
+            echo "Home directory: $HOME"
+            echo "Node version: $(node --version 2>/dev/null || echo 'Not installed')"
+            echo "NPM version: $(npm --version 2>/dev/null || echo 'Not installed')"
+            echo "PM2 version: $(pm2 --version 2>/dev/null || echo 'Not installed')"
             
             # Install Node.js if not present
             if ! command -v node &> /dev/null; then
@@ -153,17 +185,13 @@ jobs:
             
             # Install dependencies and build
             echo "Installing dependencies..."
-            npm ci --only=production
+            npm ci
             echo "Building application..."
             npm run build
             
             # Start application with PM2
             echo "Starting application..."
             pm2 start npm --name "nextjs-app" -- start
-            pm2 save
-            
-            # Setup PM2 to start on boot
-            pm2 startup
             pm2 save
             
             echo "✅ Application deployed and running!"
