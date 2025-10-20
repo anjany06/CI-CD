@@ -51,9 +51,7 @@ jobs:
 
       - name: Create deployment package
         run: |
-          cd next-aws-deploy
-          tar -czf deployment.tar.gz --exclude=node_modules --exclude=.git .
-          mv deployment.tar.gz ../
+          tar -czf deployment.tar.gz -C next-aws-deploy --exclude=node_modules --exclude=.git .
 
       - name: Copy deployment package to EC2
         uses: appleboy/scp-action@v0.1.7
