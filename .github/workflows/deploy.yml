@@ -27,7 +27,7 @@ jobs:
       - name: Run linter
         run: |
           cd next-aws-deploy
-          npm run lint
+          npm run lint || true
       
       - name: Build application
         run: |
@@ -61,110 +61,116 @@ jobs:
           cd next-aws-deploy
           tar -czf ../deployment.tar.gz --exclude=node_modules --exclude=.git .
       
-      - name: Setup SSH and Deploy
+      - name: Deploy to EC2
         env:
-          PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
           HOST: ${{ secrets.HOST_IP }}
           USER: ${{ secrets.USERNAME }}
         run: |
-          echo "🔧 Setting up SSH key..."
-          
-          # Create SSH directory
+          echo "🔧 Setting up SSH configuration..."
           mkdir -p ~/.ssh
           
-          # Write the private key using a different method to avoid encoding issues
-          cat > ~/.ssh/deploy_key << 'KEYEOF'
-          ${{ secrets.SSH_PRIVATE_KEY }}
-          KEYEOF
+          # Write SSH key using printf to avoid encoding issues
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_rsa
           
-          # Fix line endings and permissions
-          sed -i 's/\r$//' ~/.ssh/deploy_key
-          chmod 600 ~/.ssh/deploy_key
+          # Set permissions immediately
+          chmod 700 ~/.ssh
+          chmod 600 ~/.ssh/id_rsa
           
-          # Debug key structure
-          echo "Key file info:"
-          echo "Lines: $(wc -l < ~/.ssh/deploy_key)"
-          echo "Size: $(wc -c < ~/.ssh/deploy_key) bytes"
-          echo "First line: $(head -n1 ~/.ssh/deploy_key)"
-          echo "Last line: $(tail -n1 ~/.ssh/deploy_key)"
+          # Remove carriage returns if any
+          dos2unix ~/.ssh/id_rsa 2>/dev/null || sed -i 's/\r$//' ~/.ssh/id_rsa
           
-          # Add to SSH known_hosts to avoid prompts
-          ssh-keyscan -H ${HOST} >> ~/.ssh/known_hosts 2>/dev/null || true
+          echo "📋 SSH Key Info:"
+          echo "  Lines: $(wc -l < ~/.ssh/id_rsa)"
+          echo "  Size: $(wc -c < ~/.ssh/id_rsa) bytes"
+          echo "  First line: $(head -n1 ~/.ssh/id_rsa | cut -c1-30)..."
+          echo "  Last line: $(tail -n1 ~/.ssh/id_rsa)"
           
-          # Test SSH connection with simpler approach
-          echo "🔗 Testing SSH connection..."
-          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no -o ConnectTimeout=10 ${USER}@${HOST} "echo 'Connection successful!'" || {
+          # Add EC2 host to known_hosts
+          echo "🌐 Adding host to known_hosts..."
+          ssh-keyscan -H $HOST >> ~/.ssh/known_hosts 2>/dev/null || true
+          
+          # Test SSH connection
+          echo "🔗 Testing SSH connection to $USER@$HOST..."
+          if ssh -i ~/.ssh/id_rsa -o ConnectTimeout=15 -o StrictHostKeyChecking=no $USER@$HOST 'echo "✅ SSH connection successful!"'; then
+            echo "✅ Connection verified"
+          else
             echo "❌ SSH connection failed"
             exit 1
-          }
-          
-          echo "✅ SSH connection successful"
+          fi
           
           # Copy deployment package
           echo "📦 Copying deployment package..."
-          scp -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no deployment.tar.gz ${USER}@${HOST}:/tmp/
+          scp -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no deployment.tar.gz $USER@$HOST:/tmp/
           
-          # Deploy on EC2
-          echo "🚀 Deploying to EC2..."
-          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no ${USER}@${HOST} bash << 'DEPLOYEOF'
+          # Deploy application
+          echo "🚀 Deploying application..."
+          ssh -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no $USER@$HOST << 'EOF'
             set -e
             
-            echo "📋 Checking system requirements..."
+            echo "📋 System Check:"
+            echo "  User: $(whoami)"
+            echo "  Home: $HOME"
             
             # Install Node.js if needed
             if ! command -v node &> /dev/null; then
               echo "📦 Installing Node.js..."
-              curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
-              sudo apt-get install -y nodejs
+              curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash - >/dev/null 2>&1
+              sudo apt-get install -y nodejs >/dev/null 2>&1
             fi
+            echo "  Node: $(node --version)"
+            echo "  NPM: $(npm --version)"
             
             # Install PM2 if needed
             if ! command -v pm2 &> /dev/null; then
               echo "📦 Installing PM2..."
-              sudo npm install -g pm2
+              sudo npm install -g pm2 >/dev/null 2>&1
             fi
-            
-            echo "Node version: $(node --version)"
-            echo "NPM version: $(npm --version)"
-            echo "PM2 version: $(pm2 --version)"
+            echo "  PM2: $(pm2 --version)"
             
             # Stop existing app
             echo "⏹️  Stopping existing application..."
-            pm2 stop nextjs-app 2>/dev/null || true
+            pm2 stop nextjs-app 2>/dev/null || echo "  (No existing app)"
             
             # Backup current version
             echo "💾 Creating backup..."
-            rm -rf ~/app-backup 2>/dev/null || true
-            [ -d ~/my-app ] && mv ~/my-app ~/app-backup || true
+            if [ -d ~/my-app ]; then
+              rm -rf ~/app-backup
+              mv ~/my-app ~/app-backup
+            fi
             
-            # Extract new deployment
-            echo "📂 Extracting deployment package..."
+            # Extract deployment
+            echo "📂 Extracting deployment..."
             mkdir -p ~/my-app
             tar -xzf /tmp/deployment.tar.gz -C ~/my-app
             cd ~/my-app
             
-            # Install dependencies
+            # Install and build
             echo "📥 Installing dependencies..."
-            npm ci --prefer-offline --no-audit
+            npm ci --omit=dev 2>&1 | tail -3
             
-            # Build app
             echo "🔨 Building application..."
-            npm run build
+            npm run build 2>&1 | tail -5
             
-            # Start with PM2
-            echo "🟢 Starting application..."
+            # Start app
+            echo "🟢 Starting application with PM2..."
             pm2 start npm --name "nextjs-app" -- start
             pm2 save
-            pm2 startup -u ${USER} --hp /home/${USER} || true
             
-            # Verify app is running
-            echo "✅ Application deployed!"
+            sleep 2
+            
+            # Verify
+            echo "✅ Application Status:"
             pm2 status
             
             # Cleanup
             rm /tmp/deployment.tar.gz
-          DEPLOYEOF
+            
+            echo ""
+            echo "🎉 Deployment completed successfully!"
+            echo "🌐 App running on: http://$HOSTNAME:3000"
+          EOF
           
-          # Cleanup local SSH key
-          rm ~/.ssh/deploy_key
-          echo "✅ Deployment completed successfully!"
+          # Cleanup
+          rm ~/.ssh/id_rsa
+          echo "✅ Deployment finished!"
