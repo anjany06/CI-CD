@@ -53,12 +53,17 @@ jobs:
         run: |
           tar -czf deployment.tar.gz -C next-aws-deploy --exclude=node_modules --exclude=.git .
 
+      - name: Decode SSH key
+        run: |
+          echo "${{ secrets.SSH_PRIVATE_KEY_B64 }}" | base64 -d > private_key.pem
+          chmod 600 private_key.pem
+
       - name: Copy deployment package to EC2
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.HOST_IP }}
           username: ${{ secrets.USERNAME }}
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          key_path: "private_key.pem"
           source: "deployment.tar.gz"
           target: "/tmp/"
 
@@ -67,7 +72,7 @@ jobs:
         with:
           host: ${{ secrets.HOST_IP }}
           username: ${{ secrets.USERNAME }}
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          key_path: "private_key.pem"
           script: |
             set -e
 
