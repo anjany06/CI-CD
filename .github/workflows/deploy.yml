@@ -9,168 +9,119 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-      
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
         with:
           node-version: '18'
-          cache: 'npm'
-          cache-dependency-path: 'next-aws-deploy/package-lock.json'
-      
+          cache: npm
+          cache-dependency-path: next-aws-deploy/package-lock.json
+
       - name: Install dependencies
-        run: |
-          cd next-aws-deploy
-          npm ci
-      
+        working-directory: next-aws-deploy
+        run: npm ci
+
       - name: Run linter
-        run: |
-          cd next-aws-deploy
-          npm run lint || true
-      
+        working-directory: next-aws-deploy
+        run: npm run lint || true
+
       - name: Build application
-        run: |
-          cd next-aws-deploy
-          npm run build
+        working-directory: next-aws-deploy
+        run: npm run build
 
   deploy:
     needs: test
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
-    
+
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-      
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
         with:
           node-version: '18'
-          cache: 'npm'
-          cache-dependency-path: 'next-aws-deploy/package-lock.json'
-      
-      - name: Install dependencies and build
+          cache: npm
+          cache-dependency-path: next-aws-deploy/package-lock.json
+
+      - name: Install deps and build
+        working-directory: next-aws-deploy
         run: |
-          cd next-aws-deploy
           npm ci
           npm run build
-      
+
       - name: Create deployment package
         run: |
           cd next-aws-deploy
           tar -czf ../deployment.tar.gz --exclude=node_modules --exclude=.git .
-      
+
       - name: Deploy to EC2
         env:
-          SSH_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
           HOST: ${{ secrets.HOST_IP }}
           USER: ${{ secrets.USERNAME }}
+          SSH_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_KEY_B64: ${{ secrets.SSH_PRIVATE_KEY_B64 }}
         run: |
-          echo "🔧 Setting up SSH configuration..."
+          set -euo pipefail
+
+          # Write SSH key (prefer base64 if provided)
           mkdir -p ~/.ssh
-          
-          # Write SSH key using printf to avoid encoding issues
-          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_rsa
-          
-          # Set permissions immediately
+          if [ -n "${SSH_KEY_B64:-}" ]; then
+            echo "$SSH_KEY_B64" | base64 -d > ~/.ssh/id_rsa
+          else
+            cat > ~/.ssh/id_rsa <<'KEY_EOF'
+${{ secrets.SSH_PRIVATE_KEY }}
+KEY_EOF
+          fi
+
+          # Normalize and secure permissions
+          sed -i 's/\r$//' ~/.ssh/id_rsa || true
           chmod 700 ~/.ssh
           chmod 600 ~/.ssh/id_rsa
-          
-          # Remove carriage returns if any
-          dos2unix ~/.ssh/id_rsa 2>/dev/null || sed -i 's/\r$//' ~/.ssh/id_rsa
-          
-          echo "📋 SSH Key Info:"
-          echo "  Lines: $(wc -l < ~/.ssh/id_rsa)"
-          echo "  Size: $(wc -c < ~/.ssh/id_rsa) bytes"
-          echo "  First line: $(head -n1 ~/.ssh/id_rsa | cut -c1-30)..."
-          echo "  Last line: $(tail -n1 ~/.ssh/id_rsa)"
-          
-          # Add EC2 host to known_hosts
-          echo "🌐 Adding host to known_hosts..."
-          ssh-keyscan -H $HOST >> ~/.ssh/known_hosts 2>/dev/null || true
-          
-          # Test SSH connection
-          echo "🔗 Testing SSH connection to $USER@$HOST..."
-          if ssh -i ~/.ssh/id_rsa -o ConnectTimeout=15 -o StrictHostKeyChecking=no $USER@$HOST 'echo "✅ SSH connection successful!"'; then
-            echo "✅ Connection verified"
-          else
-            echo "❌ SSH connection failed"
+
+          # Validate key parses
+          if ! ssh-keygen -y -f ~/.ssh/id_rsa >/dev/null 2>&1; then
+            echo "Invalid SSH key. Recreate SSH_PRIVATE_KEY or provide SSH_PRIVATE_KEY_B64."
             exit 1
           fi
-          
-          # Copy deployment package
-          echo "📦 Copying deployment package..."
-          scp -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no deployment.tar.gz $USER@$HOST:/tmp/
-          
-          # Deploy application
-          echo "🚀 Deploying application..."
-          ssh -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no $USER@$HOST << 'EOF'
+
+          # Known hosts and connection test
+          ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts 2>/dev/null || true
+          ssh -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=no "$USER@$HOST" 'echo SSH OK'
+
+          # Copy package
+          scp -o IdentitiesOnly=yes -o StrictHostKeyChecking=no deployment.tar.gz "$USER@$HOST:/tmp/deployment.tar.gz"
+
+          # Remote deploy
+          ssh -o IdentitiesOnly=yes -o StrictHostKeyChecking=no "$USER@$HOST" << 'EOF'
             set -e
-            
-            echo "📋 System Check:"
-            echo "  User: $(whoami)"
-            echo "  Home: $HOME"
-            
-            # Install Node.js if needed
-            if ! command -v node &> /dev/null; then
-              echo "📦 Installing Node.js..."
+
+            # Node.js and PM2
+            if ! command -v node >/dev/null 2>&1; then
               curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash - >/dev/null 2>&1
               sudo apt-get install -y nodejs >/dev/null 2>&1
             fi
-            echo "  Node: $(node --version)"
-            echo "  NPM: $(npm --version)"
-            
-            # Install PM2 if needed
-            if ! command -v pm2 &> /dev/null; then
-              echo "📦 Installing PM2..."
-              sudo npm install -g pm2 >/dev/null 2>&1
+            if ! command -v pm2 >/dev/null 2>&1; then
+              sudo npm i -g pm2 >/dev/null 2>&1
             fi
-            echo "  PM2: $(pm2 --version)"
-            
-            # Stop existing app
-            echo "⏹️  Stopping existing application..."
-            pm2 stop nextjs-app 2>/dev/null || echo "  (No existing app)"
-            
-            # Backup current version
-            echo "💾 Creating backup..."
-            if [ -d ~/my-app ]; then
-              rm -rf ~/app-backup
-              mv ~/my-app ~/app-backup
-            fi
-            
-            # Extract deployment
-            echo "📂 Extracting deployment..."
+
+            # Stop and backup
+            pm2 stop nextjs-app 2>/dev/null || true
+            rm -rf ~/app-backup 2>/dev/null || true
+            [ -d ~/my-app ] && mv ~/my-app ~/app-backup || true
+
+            # Extract new build
             mkdir -p ~/my-app
             tar -xzf /tmp/deployment.tar.gz -C ~/my-app
             cd ~/my-app
-            
+
             # Install and build
-            echo "📥 Installing dependencies..."
-            npm ci --omit=dev 2>&1 | tail -3
-            
-            echo "🔨 Building application..."
-            npm run build 2>&1 | tail -5
-            
+            npm ci --omit=dev
+            npm run build
+
             # Start app
-            echo "🟢 Starting application with PM2..."
-            pm2 start npm --name "nextjs-app" -- start
+            pm2 start npm --name nextjs-app -- start
             pm2 save
-            
-            sleep 2
-            
-            # Verify
-            echo "✅ Application Status:"
-            pm2 status
-            
+
             # Cleanup
-            rm /tmp/deployment.tar.gz
-            
-            echo ""
-            echo "🎉 Deployment completed successfully!"
-            echo "🌐 App running on: http://$HOSTNAME:3000"
+            rm -f /tmp/deployment.tar.gz
           EOF
-          
-          # Cleanup
-          rm ~/.ssh/id_rsa
-          echo "✅ Deployment finished!"
