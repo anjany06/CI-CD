@@ -6,33 +6,8 @@ on:
     branches: [main, master]
 
 jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "18"
-          cache: npm
-          cache-dependency-path: next-aws-deploy/package-lock.json
-
-      - name: Install dependencies
-        working-directory: next-aws-deploy
-        run: npm ci
-
-      - name: Run linter
-        working-directory: next-aws-deploy
-        run: npm run lint || true
-
-      - name: Build application
-        working-directory: next-aws-deploy
-        run: npm run build
-
   deploy:
-    needs: test
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
 
     steps:
       - uses: actions/checkout@v4
@@ -43,93 +18,69 @@ jobs:
           cache: npm
           cache-dependency-path: next-aws-deploy/package-lock.json
 
-      - name: Install dependencies and build
+      - name: Install and build on GitHub Actions
         working-directory: next-aws-deploy
         run: |
           npm ci
           npm run build
 
-      - name: Create deployment package
+      - name: Create production package (only built files)
         run: |
-          tar -czf deployment.tar.gz -C next-aws-deploy --exclude=node_modules --exclude=.git .
+          cd next-aws-deploy
+          mkdir -p deploy-package
+          cp -r .next deploy-package/
+          cp -r public deploy-package/ 2>/dev/null || true
+          cp package.json deploy-package/
+          cp package-lock.json deploy-package/
+          cp next.config.* deploy-package/ 2>/dev/null || true
+          tar -czf ../deploy.tar.gz -C deploy-package .
 
-      - name: Copy deployment package to EC2
+      - name: Copy to EC2
         uses: appleboy/scp-action@v0.1.7
         with:
           host: 51.21.195.178
           username: ubuntu
           key: ${{ secrets.PRIVATE_SSH_KEY }}
-          port: 22
-          source: "deployment.tar.gz"
+          source: "deploy.tar.gz"
           target: "/tmp/"
 
-      - name: Deploy to EC2
+      - name: Deploy on EC2
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 51.21.195.178
           username: ubuntu
           key: ${{ secrets.PRIVATE_SSH_KEY }}
-          port: 22
           script: |
-            set -e
-
-            echo "📋 System Check..."
-
-            # Install Node.js if needed
-            if ! command -v node >/dev/null 2>&1; then
-              echo "📦 Installing Node.js 18..."
+            # Install Node.js once (if not installed)
+            if ! command -v node >/dev/null; then
               curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
               sudo apt-get install -y nodejs
             fi
-            echo "✅ Node: $(node --version)"
-            echo "✅ NPM: $(npm --version)"
 
-            # Install PM2 if needed
-            if ! command -v pm2 >/dev/null 2>&1; then
-              echo "📦 Installing PM2..."
+            # Install PM2 once (if not installed)
+            if ! command -v pm2 >/dev/null; then
               sudo npm install -g pm2
             fi
-            echo "✅ PM2: $(pm2 --version)"
 
-            # Stop existing app
-            echo "⏹️  Stopping existing app..."
-            pm2 stop nextjs-app 2>/dev/null || echo "No existing app to stop"
+            # Stop old app
+            pm2 stop nextjs-app 2>/dev/null || true
+            pm2 delete nextjs-app 2>/dev/null || true
 
-            # Backup current deployment
-            echo "💾 Creating backup..."
-            rm -rf ~/app-backup 2>/dev/null || true
-            [ -d ~/my-app ] && mv ~/my-app ~/app-backup || true
+            # Deploy new version
+            rm -rf ~/nextjs-app
+            mkdir -p ~/nextjs-app
+            tar -xzf /tmp/deploy.tar.gz -C ~/nextjs-app
+            cd ~/nextjs-app
 
-            # Extract new deployment
-            echo "📂 Extracting deployment..."
-            mkdir -p ~/my-app
-            tar -xzf /tmp/deployment.tar.gz -C ~/my-app
-            cd ~/my-app
+            # Install ONLY production dependencies (much faster, less memory)
+            npm ci --omit=dev --ignore-scripts
 
-            # Install dependencies
-            echo "📥 Installing dependencies..."
-            npm ci --omit=dev
-
-            # Build application
-            echo "🔨 Building application..."
-            npm run build
-
-            # Start with PM2
-            echo "🟢 Starting application..."
+            # Start app
             pm2 start npm --name "nextjs-app" -- start
             pm2 save
-
-            # Setup PM2 to start on boot
-            sudo env PATH=$PATH:/usr/bin pm2 startup systemd -u $USER --hp /home/$USER || true
-
-            # Show status
-            echo ""
-            echo "✅ Deployment completed!"
-            pm2 status
+            pm2 startup
 
             # Cleanup
-            rm -f /tmp/deployment.tar.gz
+            rm /tmp/deploy.tar.gz
 
-            echo ""
-            echo "🌐 Your app is running!"
-            echo "Access it at: http://51.21.195.178:3000"
+            echo "✅ Deployed! Visit: http://51.21.195.178:3000"
