@@ -11,8 +11,7 @@ export default function Home() {
             Welcome to My Next.js Application!
           </h2>
           <p className="text-xl text-gray-600 mb-8">
-            A simple Next.js app successfully deployed to AWS EC2 with CI/CD
-            pipeline
+            A simple Next.js app successfully deployed checking the working
           </p>
           <div className="inline-flex items-center px-4 py-2 bg-green-100 text-green-800 rounded-full text-sm font-medium">
             Checking 
