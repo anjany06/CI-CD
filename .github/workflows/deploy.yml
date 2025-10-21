@@ -24,15 +24,19 @@ jobs:
           npm ci
           npm run build
 
-      - name: Create production package (only built files)
+      - name: Create complete deployment package
         run: |
           cd next-aws-deploy
           mkdir -p deploy-package
+
+          # Copy everything needed
           cp -r .next deploy-package/
           cp -r public deploy-package/ 2>/dev/null || true
-          cp package.json deploy-package/
-          cp package-lock.json deploy-package/
+          cp -r src deploy-package/ 2>/dev/null || true
+          cp package*.json deploy-package/
           cp next.config.* deploy-package/ 2>/dev/null || true
+          cp tsconfig.json deploy-package/ 2>/dev/null || true
+
           tar -czf ../deploy.tar.gz -C deploy-package .
 
       - name: Copy to EC2
@@ -51,34 +55,37 @@ jobs:
           username: ubuntu
           key: ${{ secrets.PRIVATE_SSH_KEY }}
           script: |
-            # Install Node.js once (if not installed)
+            # Install Node.js
             if ! command -v node >/dev/null; then
               curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
               sudo apt-get install -y nodejs
             fi
 
-            # Install PM2 once (if not installed)
+            # Install PM2
             if ! command -v pm2 >/dev/null; then
               sudo npm install -g pm2
             fi
 
-            # Stop old app
-            pm2 stop nextjs-app 2>/dev/null || true
-            pm2 delete nextjs-app 2>/dev/null || true
+            # Stop ALL old apps
+            pm2 stop all 2>/dev/null || true
+            pm2 delete all 2>/dev/null || true
 
-            # Deploy new version
-            rm -rf ~/nextjs-app
-            mkdir -p ~/nextjs-app
-            tar -xzf /tmp/deploy.tar.gz -C ~/nextjs-app
-            cd ~/nextjs-app
+            # Deploy
+            rm -rf ~/next-aws-deploy
+            mkdir -p ~/next-aws-deploy
+            tar -xzf /tmp/deploy.tar.gz -C ~/next-aws-deploy
+            cd ~/next-aws-deploy
 
-            # Install ONLY production dependencies (much faster, less memory)
-            npm ci --omit=dev --ignore-scripts
+            # Install deps (without --ignore-scripts)
+            npm ci --omit=dev
 
             # Start app
-            pm2 start npm --name "nextjs-app" -- start
+            pm2 start npm --name "next-aws-deploy" -- start
             pm2 save
-            pm2 startup
+
+            # Show logs to verify
+            sleep 3
+            pm2 logs next-aws-deploy --lines 20 --nostream || true
 
             # Cleanup
             rm /tmp/deploy.tar.gz
