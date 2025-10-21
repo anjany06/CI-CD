@@ -53,28 +53,23 @@ jobs:
         run: |
           tar -czf deployment.tar.gz -C next-aws-deploy --exclude=node_modules --exclude=.git .
 
-      - name: Prepare SSH key
-        run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.SSH_PRIVATE_KEY_B64 }}" | base64 -d > ~/.ssh/deploy_key
-          chmod 600 ~/.ssh/deploy_key
-          ls -la ~/.ssh/deploy_key
-
       - name: Copy deployment package to EC2
         uses: appleboy/scp-action@v0.1.7
         with:
-          host: ${{ secrets.HOST_IP }}
-          username: ${{ secrets.USERNAME }}
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          host: 51.21.195.178
+          username: ubuntu
+          key: ${{ secrets.PRIVATE_SSH_KEY }}
+          port: 22
           source: "deployment.tar.gz"
           target: "/tmp/"
 
       - name: Deploy to EC2
         uses: appleboy/ssh-action@v1.0.3
         with:
-          host: ${{ secrets.HOST_IP }}
-          username: ${{ secrets.USERNAME }}
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          host: 51.21.195.178
+          username: ubuntu
+          key: ${{ secrets.PRIVATE_SSH_KEY }}
+          port: 22
           script: |
             set -e
 
@@ -137,4 +132,4 @@ jobs:
 
             echo ""
             echo "🌐 Your app is running!"
-            echo "Access it at: http://$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4):3000"
+            echo "Access it at: http://51.21.195.178:3000"
